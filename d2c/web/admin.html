@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Store admin</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="logo">Store admin</div>
+  <nav><a href="index.html"><button>View shop</button></a><button id="themebtn" aria-label="Switch colour mode"></button></nav>
+</header>
+<main id="app"><p class="sub">Loading...</p></main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+let sb, P = [], O = [], S = {};
+const app = $("#app");
+const now = () => new Date().toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" });
+
+function loginView(msg) {
+  app.innerHTML = `<h1>Sign in</h1><form id="lf" class="card" style="max-width:380px;margin-top:18px"><div class="pad">
+   <label for="em">Email</label><input id="em" type="email" required autocomplete="username">
+   <label for="pw">Password</label><input id="pw" type="password" required autocomplete="current-password">
+   <button class="pri" style="margin-top:12px">Sign in</button><div class="err" role="alert">${esc(msg || "")}</div></div></form>`;
+}
+
+function dash() {
+  const rev = O.reduce((a, o) => a + o.total_paise, 0), open = O.filter((o) => o.status !== "Delivered").length;
+  app.innerHTML = `<div class="row"><h1>Manage store</h1><button data-act="out">Sign out</button></div>
+  <div class="stats"><div class="stat"><b>${O.length}</b>Paid orders</div><div class="stat"><b>${open}</b>Open orders</div><div class="stat"><b>${inr(rev)}</b>Revenue</div><div class="stat"><b>${P.filter((p) => p.active).length}</b>Live products</div></div>
+  <h2>Store settings</h2><div class="card"><div class="pad"><div class="two">
+   <div><label>Store name</label><input data-s="store_name" value="${esc(S.store_name)}"></div>
+   <div><label>Tagline</label><input data-s="tagline" value="${esc(S.tagline)}"></div>
+   <div><label>Shipping fee (rupees)</label><input data-s="shipping" type="number" min="0" step="0.01" value="${S.shipping_paise / 100}"></div>
+   <div><label>Default carrier for new orders</label><input data-s="default_carrier" value="${esc(S.default_carrier)}"></div></div></div></div>
+  <h2>Products</h2><div class="scroll card"><table><thead><tr><th>Name</th><th>Description</th><th>Price (rupees)</th><th>Stock</th><th>Colour</th><th>Visible</th></tr></thead><tbody>
+  ${P.map((p) => `<tr>
+   <td><input data-p="name" data-id="${esc(p.id)}" value="${esc(p.name)}"></td>
+   <td><input data-p="description" data-id="${esc(p.id)}" value="${esc(p.description)}"></td>
+   <td><input data-p="price" data-id="${esc(p.id)}" type="number" min="0" step="0.01" value="${p.price_paise / 100}"></td>
+   <td><input data-p="stock" data-id="${esc(p.id)}" type="number" min="0" step="1" value="${p.stock}"></td>
+   <td><input data-p="color" data-id="${esc(p.id)}" type="color" value="${esc(p.color)}"></td>
+   <td><input data-p="active" data-id="${esc(p.id)}" type="checkbox" aria-label="Visible in shop" ${p.active ? "checked" : ""}></td></tr>`).join("")}</tbody></table></div>
+  <p><button class="pri" data-act="addp">Add product</button></p>
+  <h2>Paid orders</h2>${O.length ? `<div class="scroll card"><table><thead><tr><th>Order / customer</th><th>Contact and ID</th><th>Total</th><th>Status</th><th>Carrier</th><th>Tracking no</th></tr></thead><tbody>
+  ${O.map((o) => `<tr>
+   <td><b>${esc(o.order_code)}</b><br><span class="mut">${esc(o.customer_code)}<br>${new Date(o.created_at).toLocaleString("en-IN")}</span></td>
+   <td>${esc(o.name)}<br><span class="mut">${esc(o.email)}<br>${esc(o.phone)}<br>${esc(o.address)}<br>${esc(o.id_type)} ending ${esc(o.id_last4)}<br>${o.items.map((i) => esc(i.name) + " x" + i.q).join(", ")}</span></td>
+   <td>${inr(o.total_paise)}<br><span class="mut">${esc(o.razorpay_payment_id || "")}</span></td>
+   <td><select data-o="status" data-id="${esc(o.id)}">${STEPS.map((x) => `<option ${x === o.status ? "selected" : ""}>${x}</option>`).join("")}</select></td>
+   <td><input data-o="carrier" data-id="${esc(o.id)}" value="${esc(o.carrier)}"></td>
+   <td><input data-o="tracking_no" data-id="${esc(o.id)}" value="${esc(o.tracking_no)}" placeholder="Enter number"></td></tr>`).join("")}</tbody></table></div>` : `<div class="note">No paid orders yet. Place a test order from the shop.</div>`}`;
+}
+
+async function loadAll() {
+  const [p, o, s] = await Promise.all([
+    sb.from("products").select("*").order("created_at"),
+    sb.from("orders").select("*").eq("payment_status", "paid").order("created_at", { ascending: false }),
+    sb.from("settings").select("*").eq("id", 1).single(),
+  ]);
+  if (p.error || o.error || s.error) { alert("Could not load data: " + (p.error || o.error || s.error).message); return; }
+  P = p.data; O = o.data; S = s.data; dash();
+}
+async function save(table, match, patch) {
+  const { error } = await sb.from(table).update(patch).match(match);
+  if (error) alert("Save failed: " + error.message);
+  await loadAll();
+}
+
+document.addEventListener("change", (e) => {
+  const t = e.target, id = t.dataset.id;
+  if (t.dataset.s) { const k = t.dataset.s; save("settings", { id: 1 }, k === "shipping" ? { shipping_paise: Math.max(0, Math.round(Number(t.value) * 100) || 0) } : { [k]: t.value }); }
+  else if (t.dataset.p) {
+    const k = t.dataset.p, v = k === "price" ? { price_paise: Math.max(0, Math.round(Number(t.value) * 100) || 0) }
+      : k === "stock" ? { stock: Math.max(0, parseInt(t.value, 10) || 0) } : k === "active" ? { active: t.checked } : { [k]: t.value };
+    save("products", { id }, v);
+  } else if (t.dataset.o) {
+    const o = O.find((x) => x.id === id), k = t.dataset.o; if (!o) return;
+    if (k === "status") {
+      const i = STEPS.indexOf(t.value), t0 = now();
+      const log = STEPS.slice(0, i + 1).map((s) => (o.status_log || []).find((x) => x.s === s) || { s, t: t0 });
+      save("orders", { id }, { status: t.value, status_log: log });
+    } else save("orders", { id }, { [k]: t.value.trim() });
+  }
+});
+
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-act]"); if (!b) return;
+  if (b.dataset.act === "out") { await sb.auth.signOut(); loginView(); }
+  else if (b.dataset.act === "addp") { const { error } = await sb.from("products").insert({ name: "New product", description: "Description", price_paise: 99900, stock: 10 }); if (error) alert(error.message); await loadAll(); }
+});
+
+document.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (e.target.id !== "lf") return;
+  const { error } = await sb.auth.signInWithPassword({ email: $("#em").value.trim(), password: $("#pw").value });
+  if (error) return loginView("Sign in failed. Check your email and password.");
+  boot();
+});
+
+async function boot() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) return loginView();
+  const { data: ok } = await sb.rpc("is_admin");
+  if (!ok) { await sb.auth.signOut(); return loginView("This account is not an admin. Add its email to the admins table (see SetUp.md)."); }
+  loadAll();
+}
+(function () {
+  if (configMissing()) { app.innerHTML = '<p class="err">Open web/config.js and add your Supabase URL and anon key. See SetUp.md.</p>'; return; }
+  sb = supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
+  boot();
+})();
+</script>
+</body>
+</html>

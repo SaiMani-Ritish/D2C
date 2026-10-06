@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Store</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="logo" id="logo">Store</div>
+  <nav>
+    <button data-view="shop">Shop</button>
+    <button data-view="track">Track order</button>
+    <button id="themebtn" aria-label="Switch colour mode"></button>
+    <button id="cartbtn" class="pri">Cart (0)</button>
+  </nav>
+</header>
+<main id="app"><p class="sub">Loading...</p></main>
+<aside id="drawer" aria-label="Cart"></aside>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+let sb, products = [], settings = { store_name: "Store", tagline: "", shipping_paise: 0 };
+let view = "shop", cart = {}, drawer = false, mode = "cart", done = null, trackRes = null, trackErr = "", loadErr = "";
+const cartCount = () => Object.values(cart).reduce((a, b) => a + b, 0);
+const lines = () => Object.entries(cart).map(([id, q]) => ({ p: products.find((p) => p.id === id), q })).filter((l) => l.p);
+const subtotal = () => lines().reduce((a, l) => a + l.p.price_paise * l.q, 0);
+
+async function loadData() {
+  const [p, s] = await Promise.all([
+    sb.from("products").select("*").eq("active", true).order("created_at"),
+    sb.from("settings").select("*").eq("id", 1).single(),
+  ]);
+  if (p.error || s.error) { loadErr = "Could not load the store. Check config.js and that schema.sql has been run."; return; }
+  products = p.data; settings = s.data; loadErr = "";
+  for (const id of Object.keys(cart)) { const pr = products.find((x) => x.id === id); if (!pr || pr.stock < 1) delete cart[id]; else cart[id] = Math.min(cart[id], pr.stock); }
+}
+
+function orderCard(o) {
+  const i = STEPS.indexOf(o.status), log = o.status_log || [];
+  return `<div class="card"><div class="pad">
+   <div class="row"><b>Order ${esc(o.order_code)}</b><span class="badge">${esc(o.status)}</span></div>
+   <span class="mut">Customer ID: ${esc(o.customer_code)} | ID check: ${esc(o.id_type)} ending ${esc(o.id_last4)}</span>
+   <span class="mut">Carrier: ${esc(o.carrier || "To be assigned")} | Tracking no: ${esc(o.tracking_no || "Not assigned yet")}</span>
+   <ul class="steps">${STEPS.map((s, k) => { const l = log.find((x) => x.s === s); return `<li class="${k <= i ? "done" : ""}">${s}${l ? ` <span class="mut">${esc(l.t)}</span>` : ""}</li>`; }).join("")}</ul>
+   <span class="mut">Ship to: ${esc(o.name)}, ${esc(o.address)}</span>
+   <span>${(o.items || []).map((x) => esc(x.name) + " x" + x.q).join(", ")}</span>
+   <b>Total paid: ${inr(o.total_paise)}</b></div></div>`;
+}
+
+function shopView() {
+  if (loadErr) return `<p class="err">${esc(loadErr)}</p>`;
+  return `<h1>${esc(settings.store_name)}</h1><p class="sub">${esc(settings.tagline)}</p>
+  <div class="grid">${products.map((p) => `<article class="card">
+   <div class="tile" style="background:${esc(p.color)}" aria-hidden="true">${esc(p.name.charAt(0))}</div>
+   <div class="pad"><b>${esc(p.name)}</b><span class="mut">${esc(p.description)}</span>
+   <div class="row" style="margin-top:auto"><span class="price">${inr(p.price_paise)}</span>
+   <button class="pri" data-act="add" data-id="${esc(p.id)}" ${p.stock < 1 ? "disabled" : ""}>${p.stock < 1 ? "Sold out" : "Add to cart"}</button></div>
+   ${p.stock > 0 && p.stock < 10 ? `<span class="mut">Only ${p.stock} left</span>` : ""}</div></article>`).join("")}</div>`;
+}
+
+function trackView() {
+  return `<h1>Track your order</h1><p class="sub">Enter the order ID from your confirmation and the email you used.</p>
+  <form id="trackf" class="card" style="max-width:460px;margin-top:18px"><div class="pad">
+   <label for="t1">Order ID</label><input id="t1" required placeholder="ORD-XXXXXX">
+   <label for="t2">Email</label><input id="t2" type="email" required placeholder="you@example.com">
+   <button class="pri" style="margin-top:12px">Find order</button>
+   ${trackErr ? `<div class="err">${esc(trackErr)}</div>` : ""}</div></form>
+   ${trackRes ? `<div style="max-width:560px;margin-top:18px">${orderCard(trackRes)}</div>` : ""}`;
+}
+
+function drawerView() {
+  const close = `<button data-act="close">Close</button>`;
+  if (mode === "done" && done) return `<div class="row"><h2 style="margin:0">Order placed</h2>${close}</div><p>Thanks, ${esc(done.name)}. Keep these details:</p>${orderCard(done)}<button class="pri" data-act="close">Continue shopping</button>`;
+  const L = lines();
+  if (!L.length) return `<div class="row"><h2 style="margin:0">Your cart</h2>${close}</div><p class="mut">Your cart is empty. Add a product to start.</p>`;
+  const total = subtotal() + settings.shipping_paise;
+  const sum = `<div class="row"><span>Subtotal</span><b>${inr(subtotal())}</b></div><div class="row"><span>Shipping</span><b>${inr(settings.shipping_paise)}</b></div><div class="row"><span>Total</span><b class="price">${inr(total)}</b></div>`;
+  if (mode === "cart") return `<div class="row"><h2 style="margin:0">Your cart</h2>${close}</div>
+   ${L.map((l) => `<div class="row" style="padding:10px 0;border-bottom:1px solid var(--line)"><div><b>${esc(l.p.name)}</b><br><span class="mut">${inr(l.p.price_paise)}</span></div>
+   <div><button data-act="dec" data-id="${esc(l.p.id)}" aria-label="Decrease">-</button> ${l.q} <button data-act="inc" data-id="${esc(l.p.id)}" aria-label="Increase">+</button></div></div>`).join("")}
+   <div style="margin:14px 0">${sum}</div><button class="pri" style="width:100%" data-act="checkout">Checkout</button>`;
+  return `<div class="row"><h2 style="margin:0">Checkout</h2><button data-act="back">Back</button></div>
+  <form id="co">
+   <label for="c1">Full name</label><input id="c1" name="name" required autocomplete="name" placeholder="Full Name">
+   <label for="c2">Email</label><input id="c2" name="email" type="email" required autocomplete="email" placeholder="you@example.com">
+   <label for="c3">Phone</label><input id="c3" name="phone" required autocomplete="tel" placeholder="+91 00000 00000">
+   <label for="c4">Delivery address</label><input id="c4" name="address" required autocomplete="street-address" placeholder="Street, City, State, PIN code">
+   <div class="two"><div><label for="c5">ID type</label><select id="c5" name="idType"><option>Aadhaar</option><option>PAN</option><option>Passport</option><option>Driving licence</option><option>Voter ID</option></select></div>
+   <div><label for="c6">ID last 4 characters</label><input id="c6" name="idLast4" required maxlength="4" minlength="4" pattern="[A-Za-z0-9]{4}" placeholder="0000"></div></div>
+   <div class="note">Only the ID type and last 4 characters are stored, for delivery verification. Never enter a full ID number.</div>
+   <div style="margin:12px 0">${sum}</div>
+   <button class="pri" style="width:100%" id="paybtn">Pay ${inr(total)}</button>
+   <div class="err" id="coerr" role="alert"></div></form>`;
+}
+
+function render() {
+  $("#logo").textContent = settings.store_name; document.title = settings.store_name;
+  $("#cartbtn").textContent = "Cart (" + cartCount() + ")";
+  document.querySelectorAll("[data-view]").forEach((b) => b.classList.toggle("on", b.dataset.view === view));
+  $("#app").innerHTML = view === "shop" ? shopView() : trackView();
+  $("#drawer").innerHTML = drawerView();
+  $("#drawer").classList.toggle("open", drawer);
+}
+
+async function errText(error, data) {
+  if (data && data.error) return data.error;
+  try { return (await error.context.json()).error || "Something went wrong. Try again."; } catch (_) { return "Something went wrong. Try again."; }
+}
+
+async function pay(form) {
+  const btn = $("#paybtn"), out = $("#coerr"), label = btn.textContent;
+  const say = (m) => { out.textContent = m; btn.disabled = false; btn.textContent = label; };
+  btn.disabled = true; btn.textContent = "Starting payment..."; out.textContent = "";
+  const f = form.elements;
+  const body = { name: f.name.value, email: f.email.value, phone: f.phone.value, address: f.address.value,
+    idType: f.idType.value, idLast4: f.idLast4.value, items: Object.entries(cart).map(([id, q]) => ({ id, q })) };
+  const { data, error } = await sb.functions.invoke("create-order", { body });
+  if (error || !data || data.error) return say(await errText(error, data));
+  const rzp = new Razorpay({
+    key: data.keyId, amount: data.amount, currency: "INR", order_id: data.razorpayOrderId,
+    name: settings.store_name, description: "Order " + data.orderCode,
+    prefill: { name: body.name, email: body.email, contact: body.phone }, theme: { color: "#0f4c5c" },
+    handler: async (r) => {
+      btn.textContent = "Confirming payment...";
+      const v = await sb.functions.invoke("verify-payment", { body: r });
+      if (v.error || !v.data || v.data.error) return say(await errText(v.error, v.data) + " Payment ID: " + r.razorpay_payment_id);
+      done = v.data.order; cart = {}; mode = "done"; await loadData(); render();
+    },
+    modal: { ondismiss: () => say("Payment window closed. Your cart is saved, so you can try again.") },
+  });
+  rzp.on("payment.failed", (r) => say((r.error && r.error.description) || "Payment failed. Try again."));
+  rzp.open();
+}
+
+document.addEventListener("click", (e) => {
+  const nv = e.target.closest("[data-view]");
+  if (nv) { view = nv.dataset.view; render(); return; }
+  if (e.target.closest("#cartbtn")) { drawer = true; if (mode === "done") mode = "cart"; render(); return; }
+  const b = e.target.closest("[data-act]"); if (!b) return;
+  const a = b.dataset.act, id = b.dataset.id, p = products.find((x) => x.id === id);
+  if (a === "add") { if (p && (cart[id] || 0) < p.stock) cart[id] = (cart[id] || 0) + 1; drawer = true; mode = "cart"; }
+  else if (a === "inc") { if (p && cart[id] < p.stock) cart[id]++; }
+  else if (a === "dec") { cart[id]--; if (cart[id] < 1) delete cart[id]; }
+  else if (a === "close") { drawer = false; mode = "cart"; }
+  else if (a === "checkout") mode = "checkout";
+  else if (a === "back") mode = "cart";
+  render();
+});
+
+document.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (e.target.id === "co") pay(e.target);
+  else if (e.target.id === "trackf") {
+    const { data, error } = await sb.rpc("track_order", { p_code: $("#t1").value, p_email: $("#t2").value });
+    trackRes = !error && data ? data : null;
+    trackErr = trackRes ? "" : "No paid order matches that ID and email. Check both and try again.";
+    render();
+  }
+});
+
+(async function () {
+  if (configMissing()) { $("#app").innerHTML = '<p class="err">Open web/config.js and add your Supabase URL and anon key. See SetUp.md.</p>'; return; }
+  sb = supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
+  await loadData(); render();
+})();
+</script>
+</body>
+</html>
